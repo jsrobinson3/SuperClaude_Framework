@@ -1,14 +1,23 @@
 """
 Agent Teams Configuration
 
-Configures Claude Code's experimental agent teams feature.
-Enables the feature flag, installs team-oriented slash commands,
-and adds agent team patterns to CLAUDE.md.
+Configures Claude Code's experimental agent teams feature with
+specialized agent roles derived from project analysis.
 
-Based on patterns from:
+The key idea (from Anthropic's C compiler project): each agent has a
+distinct SPECIALIZATION, not just a file/repo assignment. Roles like
+"deduplicator", "performance optimizer", "code quality critic" produce
+better results than generic "frontend agent" / "backend agent".
+
+Roles are selected based on what the project analysis reveals:
+- Python project with pytest → test coverage agent, type safety agent
+- JS/TS project → bundle size agent, accessibility agent
+- Any project with linters → code quality critic using those linters
+- Any project with Docker → infrastructure agent
+
+Based on:
 - Official docs: https://code.claude.com/docs/en/agent-teams
-- C compiler project: 16 parallel agents building 100K lines
-  (https://www.anthropic.com/engineering/building-c-compiler)
+- C compiler project: https://www.anthropic.com/engineering/building-c-compiler
 """
 
 import json
@@ -16,7 +25,125 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# ── Agent Team Slash Commands ──────────────────────────────────────────
+# ── Specialist Role Definitions ────────────────────────────────────────
+# Each role has:
+#   - A spawn prompt describing the agent's specialization
+#   - Conditions under which the role is relevant (detected from analysis)
+#   - Whether it's always-on or project-dependent
+
+SPECIALIST_ROLES: Dict[str, Dict[str, Any]] = {
+    "deduplicator": {
+        "title": "Code Deduplicator",
+        "spawn_prompt": (
+            "You are the deduplication specialist. Your job is to find and coalesce "
+            "duplicate or near-duplicate code across the codebase. Search for functions "
+            "that do similar things with slight variations, copy-pasted logic, and "
+            "repeated patterns that should be abstracted. When you find duplicates, "
+            "extract them into shared utilities or base classes. Run the test suite "
+            "after each change to ensure nothing breaks."
+        ),
+        "when": "always",
+        "category": "quality",
+    },
+    "quality-critic": {
+        "title": "Code Quality Critic",
+        "spawn_prompt": (
+            "You are the code quality critic. Review the codebase from the perspective "
+            "of an experienced {language} developer. Focus on: naming clarity, single "
+            "responsibility, unnecessary complexity, dead code, inconsistent patterns, "
+            "and violations of the project's own conventions (see CLAUDE.md). Make "
+            "structural improvements. {linter_instruction}"
+        ),
+        "when": "always",
+        "category": "quality",
+    },
+    "test-coverage": {
+        "title": "Test Coverage Agent",
+        "spawn_prompt": (
+            "You are the test coverage specialist. Your job is to find untested code "
+            "paths and write tests for them. Use '{test_command}' to run the suite. "
+            "Focus on: uncovered branches, edge cases, error paths, and integration "
+            "points. Write tests that follow the patterns in the existing test suite "
+            "at {test_dir}/. Prioritize tests that would have caught real bugs."
+        ),
+        "when": "has_tests",
+        "category": "quality",
+    },
+    "performance": {
+        "title": "Performance Optimizer",
+        "spawn_prompt": (
+            "You are the performance specialist. Profile and optimize the codebase "
+            "for speed and resource efficiency. Look for: unnecessary allocations, "
+            "N+1 query patterns, missing caching opportunities, expensive operations "
+            "in hot paths, and algorithmic improvements. Benchmark before and after "
+            "each change. Don't micro-optimize — focus on changes with measurable impact."
+        ),
+        "when": "always",
+        "category": "performance",
+    },
+    "security-auditor": {
+        "title": "Security Auditor",
+        "spawn_prompt": (
+            "You are the security auditor. Scan the codebase for vulnerabilities: "
+            "injection risks (SQL, command, XSS), authentication/authorization flaws, "
+            "hardcoded secrets, insecure dependencies, missing input validation, "
+            "and OWASP Top 10 issues. For each finding, implement the fix and "
+            "write a test that verifies the vulnerability is closed."
+        ),
+        "when": "always",
+        "category": "security",
+    },
+    "documentation": {
+        "title": "Documentation Writer",
+        "spawn_prompt": (
+            "You are the documentation specialist. Find undocumented or poorly "
+            "documented public APIs, modules, and complex logic. Write clear "
+            "docstrings, update README sections, and add inline comments only "
+            "where the logic is non-obvious. Follow the existing documentation "
+            "style in the project. Don't over-document trivial code."
+        ),
+        "when": "always",
+        "category": "docs",
+    },
+    "type-safety": {
+        "title": "Type Safety Agent",
+        "spawn_prompt": (
+            "You are the type safety specialist. Add or fix type annotations "
+            "throughout the codebase. Use '{type_checker}' to find type errors. "
+            "Focus on: missing return types, Any types that should be specific, "
+            "incorrect generics, and union types that can be narrowed. Run the "
+            "type checker after each change to ensure you're making progress."
+        ),
+        "when": "has_type_checker",
+        "category": "quality",
+    },
+    "dependency-updater": {
+        "title": "Dependency Updater",
+        "spawn_prompt": (
+            "You are the dependency management specialist. Audit all project "
+            "dependencies for: outdated versions with security patches, unused "
+            "dependencies that can be removed, dependencies that can be consolidated, "
+            "and license compliance. Update one dependency at a time and run the "
+            "test suite after each update to catch breakage immediately."
+        ),
+        "when": "always",
+        "category": "maintenance",
+    },
+    "api-consistency": {
+        "title": "API Consistency Agent",
+        "spawn_prompt": (
+            "You are the API consistency specialist. Review all API endpoints, "
+            "function signatures, and public interfaces for consistency: naming "
+            "conventions, error response formats, parameter ordering, HTTP methods, "
+            "status codes, and documentation. Make interfaces consistent without "
+            "breaking existing callers."
+        ),
+        "when": "has_api",
+        "category": "quality",
+    },
+}
+
+# ── Team Slash Commands ────────────────────────────────────────────────
 
 TEAM_COMMANDS: Dict[str, Dict[str, str]] = {
     "team-review": {
@@ -25,19 +152,23 @@ TEAM_COMMANDS: Dict[str, Dict[str, str]] = {
         "content": """\
 Create an agent team to review the current changes. Target: $ARGUMENTS
 
-Spawn three reviewer teammates, each with a distinct lens:
-- **Security reviewer**: Focus on auth, input validation, injection risks, secret handling, OWASP top 10.
-- **Quality reviewer**: Focus on code patterns, maintainability, naming, SOLID principles, test coverage.
-- **Performance reviewer**: Focus on N+1 queries, memory leaks, unnecessary allocations, algorithmic complexity.
+Read .claude/teams.json for the configured specialist roles in this project.
 
-Instructions for the team:
+Spawn reviewer teammates using these roles from teams.json:
+- **security-auditor**: auth, injection, OWASP top 10
+- **quality-critic**: patterns, naming, complexity, conventions from CLAUDE.md
+- **performance**: N+1 queries, allocations, algorithmic complexity
+
+Use each role's spawn_prompt from teams.json when creating the teammate.
+
+Instructions:
 1. Each reviewer works from git diff of the current branch vs the base branch
-2. Reviewers should challenge each other's findings — if one flags something, others should verify or dispute
-3. After all reviewers finish, synthesize into a single review summary with severity ratings:
+2. Reviewers challenge each other's findings — verify or dispute
+3. Synthesize into a single review with severity ratings:
    - CRITICAL: must fix before merge
    - WARNING: should fix, acceptable to defer
    - INFO: suggestion for improvement
-4. Present the consolidated review with file paths and line numbers
+4. Present consolidated review with file paths and line numbers
 """,
     },
     "team-debug": {
@@ -46,44 +177,41 @@ Instructions for the team:
         "content": """\
 Create an agent team to investigate a bug with competing hypotheses. Bug: $ARGUMENTS
 
-Spawn 3-5 investigator teammates, each pursuing a different hypothesis:
-- Have each teammate form an independent theory about the root cause
-- Teammates should actively try to DISPROVE each other's theories
-- This adversarial approach prevents anchoring on the first plausible explanation
+Spawn 3-5 investigator teammates. Each pursues a DIFFERENT theory about the root cause.
+Teammates should actively try to DISPROVE each other's theories — this adversarial
+approach prevents anchoring on the first plausible explanation.
 
-Instructions for the team:
-1. Lead breaks down the symptom into possible cause categories (data, logic, timing, config, dependency)
+Instructions:
+1. Lead decomposes the symptom into cause categories (data, logic, timing, config, dependency)
 2. Each teammate investigates one category independently
-3. Teammates share evidence and challenge each other's findings
-4. The theory that survives disproval attempts is most likely the real root cause
-5. Once consensus emerges, one teammate implements the fix while another writes the test
-6. Present: root cause, evidence, fix, and test coverage
+3. Teammates share evidence and challenge each other
+4. The theory that survives disproval is most likely the real cause
+5. Once consensus emerges, one teammate fixes while another writes the test
+6. Present: root cause, evidence, fix, test coverage
 """,
     },
     "team-build": {
         "filename": "team-build.md",
-        "description": "Parallel feature implementation with owned modules",
+        "description": "Parallel feature build with specialist roles",
         "content": """\
-Create an agent team to build a feature in parallel. Feature: $ARGUMENTS
+Create an agent team to build a feature with specialized roles. Feature: $ARGUMENTS
 
-Use the C-compiler pattern: decompose into independent modules, each owned by one teammate.
+Read .claude/teams.json for this project's specialist roles.
 
-Instructions for the team:
-1. Lead uses Sequential Thinking to decompose the feature into independent units:
-   - Each unit should touch DIFFERENT files (avoid merge conflicts)
-   - Identify interfaces/contracts between units upfront
-   - Create a task list with 5-6 tasks per teammate
-2. Spawn teammates, each owning a distinct layer:
-   - Data models / types / schemas
-   - Business logic / service layer
-   - API routes / controllers
-   - Tests (unit + integration)
-   - Documentation / migration scripts (if needed)
-3. Require plan approval before teammates start implementing
-4. Each teammate follows the patterns in CLAUDE.md
-5. After implementation, run the full test suite to catch integration issues
-6. If tests break, assign failing tests to individual teammates (trivially parallel)
+Use the C-compiler pattern: decompose into independent work, each owned by one specialist.
+
+Instructions:
+1. Lead decomposes the feature into independent implementation tasks
+2. Assign each task to the most relevant specialist role from teams.json
+3. Each teammate OWNS distinct files — no two edit the same file
+4. Require plan approval before implementation starts
+5. After implementation, spawn the test-coverage specialist to verify
+6. If tests fail, assign each failure to a different teammate (trivially parallel)
 7. Present: files created, test results, integration status
+
+Additional specialist roles to spawn alongside the implementers:
+- **deduplicator**: runs after implementation to coalesce any duplicate code
+- **quality-critic**: reviews the new code against project conventions
 """,
     },
     "team-research": {
@@ -92,60 +220,47 @@ Instructions for the team:
         "content": """\
 Create an agent team to research a topic from multiple angles. Topic: $ARGUMENTS
 
-Spawn teammates with different research perspectives:
-- **Advocate**: find evidence supporting this approach, best practices, success stories
-- **Critic**: find evidence against, failure modes, risks, alternatives
-- **Practitioner**: find real-world implementations, code examples, libraries
-- **Architect**: evaluate system design implications, scalability, maintainability
+Spawn teammates with different perspectives:
+- **Advocate**: evidence supporting this approach, best practices, success stories
+- **Critic**: evidence against, failure modes, risks, alternatives
+- **Practitioner**: real-world implementations, code examples, libraries
+- **Architect**: system design implications, scalability, maintainability
 
-Instructions for the team:
-1. Each teammate researches independently using available tools
+Instructions:
+1. Each teammate researches independently
 2. Teammates share findings and debate trade-offs
 3. Synthesize into a decision document:
    - Recommendation with confidence level
    - Pros/cons matrix
    - Risk assessment
-   - Suggested implementation approach
-   - Links to sources and references
+   - Implementation approach
 """,
     },
     "team-refactor": {
         "filename": "team-refactor.md",
-        "description": "Safe parallel refactoring with file ownership",
+        "description": "Safe parallel refactoring with specialist roles",
         "content": """\
-Create an agent team to refactor code safely in parallel. Target: $ARGUMENTS
+Create an agent team to refactor code with specialist roles. Target: $ARGUMENTS
 
-Key principle: each teammate OWNS a set of files. No two teammates edit the same file.
+Read .claude/teams.json for this project's specialist roles.
 
-Instructions for the team:
-1. Lead analyzes the refactoring scope and creates a file ownership map
-2. Spawn teammates, each assigned specific files/modules:
-   - Assign 5-6 tasks per teammate for steady progress
-   - Include "update tests" as a task for each module owner
+Instructions:
+1. Lead creates a file ownership map — each teammate owns distinct files
+2. Spawn specialists from teams.json:
+   - **quality-critic**: owns the structural refactoring
+   - **deduplicator**: owns extracting shared code
+   - **test-coverage**: owns updating and expanding tests
+   - **documentation**: owns updating docs for changed interfaces
 3. Require plan approval — reject plans that modify files owned by another teammate
-4. Each teammate:
-   - Refactors their owned files
-   - Updates corresponding tests
-   - Runs tests on their module
-5. After all teammates finish, run the full test suite
-6. If integration tests fail, the lead assigns cross-module fixes
-7. Present: what changed, test results, before/after metrics
+4. After all finish, run the full test suite
+5. Present: what changed, before/after metrics, test results
 """,
     },
 }
 
-# ── Agent Teams Settings ───────────────────────────────────────────────
-
-AGENT_TEAMS_SETTINGS = {
-    "env": {
-        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    },
-    "teammateMode": "auto",
-}
-
 
 class AgentTeamsConfigurator:
-    """Configures Claude Code agent teams support."""
+    """Configures Claude Code agent teams with project-aware specialist roles."""
 
     def __init__(self, project_dir: Optional[str] = None, scope: str = "project"):
         self.project_dir = Path(project_dir or os.getcwd()).resolve()
@@ -160,92 +275,148 @@ class AgentTeamsConfigurator:
             self.settings_path = self.project_dir / ".claude" / "settings.json"
 
         self.commands_dir = self.project_dir / ".claude" / "commands"
+        self.teams_config_path = self.project_dir / ".claude" / "teams.json"
 
     def install(
         self,
-        enable_feature: bool = True,
-        install_commands: bool = True,
+        analysis: Optional[Dict[str, Any]] = None,
         teammate_mode: str = "auto",
         dry_run: bool = False,
     ) -> Tuple[bool, str]:
         """
-        Configure agent teams support.
+        Configure agent teams.
 
-        - Enables the experimental feature flag in settings.json
-        - Installs team-oriented slash commands
+        1. Enables the experimental feature flag
+        2. Selects specialist roles based on project analysis
+        3. Writes teams.json with role definitions and spawn prompts
+        4. Installs team slash commands
         """
         parts = []
 
-        if enable_feature:
-            result = self._enable_feature_flag(teammate_mode, dry_run)
-            parts.append(result)
+        # Enable feature flag
+        parts.append(self._enable_feature_flag(teammate_mode, dry_run))
 
-        if install_commands:
-            result = self._install_commands(dry_run)
-            parts.append(result)
+        # Select and configure roles
+        roles = self._select_roles(analysis)
+        parts.append(self._write_teams_config(roles, dry_run))
+
+        # Install commands
+        parts.append(self._install_commands(dry_run))
 
         return True, "\n".join(parts)
 
-    def list_commands(self) -> List[Dict[str, str]]:
-        """List available agent team commands."""
-        result = []
-        for name, tmpl in TEAM_COMMANDS.items():
-            installed = (self.commands_dir / tmpl["filename"]).exists()
-            result.append({
-                "name": name,
-                "filename": tmpl["filename"],
-                "description": tmpl["description"],
-                "installed": installed,
+    def _select_roles(self, analysis: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Select specialist roles relevant to this project."""
+        selected = []
+
+        # Build context for template substitution
+        context = self._build_context(analysis)
+
+        for role_id, role_def in SPECIALIST_ROLES.items():
+            condition = role_def["when"]
+
+            if condition == "always":
+                pass  # Always include
+            elif condition == "has_tests" and not context.get("test_command"):
+                continue
+            elif condition == "has_type_checker" and not context.get("type_checker"):
+                continue
+            elif condition == "has_api" and not context.get("has_api"):
+                continue
+
+            # Format spawn prompt with project-specific context
+            prompt = role_def["spawn_prompt"].format(**context)
+
+            selected.append({
+                "id": role_id,
+                "title": role_def["title"],
+                "spawn_prompt": prompt,
+                "category": role_def["category"],
             })
-        return result
 
-    def generate_claude_md_section(self) -> str:
-        """Generate CLAUDE.md section for agent teams best practices."""
-        return """\
-## Agent Teams — Parallel Work Patterns
+        return selected
 
-This project has agent teams enabled. Use them for tasks where parallel
-exploration adds real value. Don't use them for sequential work or when
-teammates would need to edit the same files.
+    def _build_context(self, analysis: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        """Build template context from project analysis."""
+        ctx: Dict[str, str] = {
+            "language": "the project's primary language",
+            "linter_instruction": "",
+            "test_command": "",
+            "test_dir": "tests",
+            "type_checker": "",
+            "has_api": "",
+        }
 
-### When to Use Agent Teams
-- Code review (security + quality + performance reviewers)
-- Bug investigation (competing hypotheses)
-- New features with independent modules
-- Research from multiple angles
-- Large refactors with clear file ownership
+        if not analysis:
+            return ctx
 
-### When NOT to Use Agent Teams
-- Sequential tasks with dependencies between steps
-- Same-file edits (use a single session instead)
-- Small, focused tasks (overhead > benefit)
+        # Language
+        langs = analysis.get("languages", [])
+        primary = next((l["name"] for l in langs if l.get("primary")), None)
+        if primary:
+            ctx["language"] = primary
 
-### Key Patterns
+        # Linters
+        linters = [l["name"] for l in analysis.get("linters", [])]
+        if linters:
+            ctx["linter_instruction"] = (
+                f"Use {', '.join(linters)} to validate your changes."
+            )
 
-**File ownership**: Each teammate owns a distinct set of files. No two
-teammates should edit the same file — this prevents merge conflicts and
-overwrites.
+        # Type checker
+        if "mypy" in linters:
+            ctx["type_checker"] = "mypy"
+        elif "pyright" in linters:
+            ctx["type_checker"] = "pyright"
 
-**Plan approval**: For risky work, require teammates to plan before
-implementing. Review and approve plans before they start coding.
+        # Test framework
+        test_fws = analysis.get("test_frameworks", [])
+        if test_fws:
+            tf = test_fws[0]
+            if tf["name"] == "pytest":
+                pkg_mgrs = [p["name"] for p in analysis.get("package_managers", [])]
+                if "uv" in pkg_mgrs:
+                    ctx["test_command"] = "uv run pytest"
+                else:
+                    ctx["test_command"] = "pytest"
+            elif tf["name"] in ("jest", "vitest"):
+                ctx["test_command"] = f"npx {tf['name']}"
+            else:
+                ctx["test_command"] = tf["name"]
 
-**Task sizing**: 5-6 tasks per teammate keeps everyone productive.
-Too few tasks = idle teammates. Too many = lost context.
+            if tf.get("test_dirs"):
+                ctx["test_dir"] = tf["test_dirs"][0]
 
-**Testing harness** (from the C compiler pattern): When many tests fail,
-assign each failing test to a different teammate — trivially parallel.
-Use `--fast` sampling (1-10% of tests) during development, full suite
-before merging.
+        # API detection (check for frameworks that imply API routes)
+        frameworks = [f["name"] for f in analysis.get("frameworks", [])]
+        api_frameworks = {"fastapi", "flask", "django", "Express", "NestJS", "Next.js"}
+        if any(f in api_frameworks for f in frameworks):
+            ctx["has_api"] = "true"
 
-### Available Team Commands
-- `/team-review` — Parallel code review with specialized reviewers
-- `/team-debug` — Debug with competing hypotheses
-- `/team-build` — Parallel feature implementation with owned modules
-- `/team-research` — Multi-angle research and decision-making
-- `/team-refactor` — Safe parallel refactoring with file ownership
-"""
+        return ctx
 
-    # ── Private ────────────────────────────────────────────────────────
+    def _write_teams_config(
+        self, roles: List[Dict[str, Any]], dry_run: bool
+    ) -> str:
+        """Write teams.json with selected specialist roles."""
+        config = {
+            "_comment": (
+                "Agent team specialist roles for this project. "
+                "Generated by superclaude bootstrap. "
+                "Edit spawn_prompt to customize each role's behavior."
+            ),
+            "roles": {r["id"]: r for r in roles},
+        }
+
+        if dry_run:
+            lines = [f"Would write {len(roles)} specialist role(s) to {self.teams_config_path}:"]
+            for r in roles:
+                lines.append(f"  {r['title']:30} [{r['category']}]")
+            return "\n".join(lines)
+
+        self.teams_config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.teams_config_path.write_text(json.dumps(config, indent=2) + "\n")
+        return f"Wrote {len(roles)} specialist roles to {self.teams_config_path}"
 
     def _enable_feature_flag(self, teammate_mode: str, dry_run: bool) -> str:
         """Enable agent teams in settings.json."""
@@ -256,15 +427,10 @@ before merging.
             )
 
         settings = self._load_settings()
-
-        # Merge env vars
         if "env" not in settings:
             settings["env"] = {}
         settings["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
-
-        # Set teammate mode
         settings["teammateMode"] = teammate_mode
-
         self._save_settings(settings)
         return f"Enabled agent teams in {self.settings_path} (mode: {teammate_mode})"
 
@@ -277,9 +443,9 @@ before merging.
             return "\n".join(lines)
 
         self.commands_dir.mkdir(parents=True, exist_ok=True)
-
         installed = []
         skipped = []
+
         for name, tmpl in TEAM_COMMANDS.items():
             path = self.commands_dir / tmpl["filename"]
             if path.exists():
@@ -294,6 +460,54 @@ before merging.
         if skipped:
             parts.append(f"Already exists (skipped): {', '.join(skipped)}")
         return "\n".join(parts)
+
+    def generate_claude_md_section(self, roles: Optional[List[Dict[str, Any]]] = None) -> str:
+        """Generate CLAUDE.md section for agent teams."""
+        lines = [
+            "## Agent Teams — Specialist Roles",
+            "",
+            "This project has agent teams enabled with project-specific specialist roles",
+            "defined in `.claude/teams.json`. Each role has a tuned spawn prompt.",
+            "",
+            "### Available Specialists",
+        ]
+
+        if roles:
+            for r in roles:
+                lines.append(f"- **{r['title']}** [{r['category']}]")
+        else:
+            lines.append("- See `.claude/teams.json` for the full list")
+
+        lines.extend([
+            "",
+            "### Key Patterns",
+            "",
+            "**Specialization over assignment**: Give each agent a distinct skill",
+            "(deduplicator, performance optimizer, security auditor) rather than",
+            "a generic area (frontend, backend). Specialists produce better results.",
+            "",
+            "**File ownership**: Each teammate owns distinct files. No two teammates",
+            "edit the same file — this prevents conflicts and overwrites.",
+            "",
+            "**Adversarial review**: For debugging, have agents actively try to",
+            "DISPROVE each other's theories. The hypothesis that survives is most",
+            "likely correct.",
+            "",
+            "**Failing test parallelization**: When many tests fail, assign each",
+            "to a different agent — trivially parallel.",
+            "",
+            "### Team Commands",
+            "- `/team-build` — Parallel feature build with specialist roles",
+            "- `/team-review` — Code review (security + quality + performance)",
+            "- `/team-debug` — Competing hypothesis investigation",
+            "- `/team-research` — Multi-angle research",
+            "- `/team-refactor` — Parallel refactoring with file ownership",
+            "",
+        ])
+
+        return "\n".join(lines)
+
+    # ── Settings I/O ───────────────────────────────────────────────────
 
     def _load_settings(self) -> Dict[str, Any]:
         if self.settings_path.exists():
