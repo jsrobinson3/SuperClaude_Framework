@@ -10,6 +10,7 @@ Orchestrates the full Claude Code environment setup:
   superclaude bootstrap --llm       # Set up local LLM only
   superclaude bootstrap --claude-md # Generate CLAUDE.md files only
   superclaude bootstrap --teams     # Configure agent teams only
+  superclaude bootstrap --docker-agents  # Generate Docker agent infrastructure
 """
 
 import os
@@ -19,6 +20,7 @@ import click
 
 from superclaude.bootstrap.agent_teams import AgentTeamsConfigurator
 from superclaude.bootstrap.analyzer import EnvironmentAnalyzer
+from superclaude.bootstrap.docker_agents import DockerAgentOrchestrator
 from superclaude.bootstrap.claude_md import ClaudeMdGenerator
 from superclaude.bootstrap.commands import CommandScaffolder
 from superclaude.bootstrap.hooks import HOOK_PROFILES, HookInstaller
@@ -51,6 +53,13 @@ from superclaude.bootstrap.mcp_config import McpConfigManager
     default="auto",
     help="Agent teams display mode (default: auto)",
 )
+@click.option("--docker-agents", is_flag=True, help="Generate Docker agent infrastructure")
+@click.option(
+    "--docker-layout",
+    type=click.Choice(["single", "fullstack", "microservices"]),
+    default="single",
+    help="Docker agent layout for multi-repo projects",
+)
 @click.option(
     "--scope",
     type=click.Choice(["project", "user", "local"]),
@@ -72,6 +81,8 @@ def bootstrap(
     claude_md,
     teams,
     teammate_mode,
+    docker_agents,
+    docker_layout,
     scope,
     dry_run,
     vram,
@@ -96,7 +107,7 @@ def bootstrap(
         superclaude bootstrap --dry-run                # Preview everything
     """
     # If no specific flag, run everything
-    run_all = not any([analyze, hooks, mcp, commands, llm, claude_md, teams])
+    run_all = not any([analyze, hooks, mcp, commands, llm, claude_md, teams, docker_agents])
 
     project_dir = os.getcwd()
 
@@ -226,7 +237,37 @@ def bootstrap(
         _show_result(success, msg)
         click.echo()
 
-    # ── Step 7: Local LLM ────────────────────────────────────────────
+    # ── Step 7: Docker Agents ────────────────────────────────────────
+    if docker_agents:
+        click.echo("== Docker Agent Infrastructure ==\n")
+        orchestrator = DockerAgentOrchestrator(project_dir)
+        examples = orchestrator.generate_example_configs()
+
+        if docker_layout == "single":
+            click.echo("  Layout: single repo (3 agents: feature, test, review)")
+            success, msg = orchestrator.install(
+                agents=examples["single_repo"],
+                dry_run=dry_run,
+            )
+        elif docker_layout == "fullstack":
+            click.echo("  Layout: fullstack (frontend + backend, 2 agents each)")
+            click.echo("  Edit .claude/docker-agents/docker-compose.yml to set your repo paths")
+            success, msg = orchestrator.install(
+                repos=examples["fullstack"],
+                dry_run=dry_run,
+            )
+        elif docker_layout == "microservices":
+            click.echo("  Layout: microservices (auth + gateway + frontend, 1 agent each)")
+            click.echo("  Edit .claude/docker-agents/docker-compose.yml to set your repo paths")
+            success, msg = orchestrator.install(
+                repos=examples["microservices"],
+                dry_run=dry_run,
+            )
+
+        _show_result(success, msg)
+        click.echo()
+
+    # ── Step 8: Local LLM ────────────────────────────────────────────
     if run_all or llm:
         click.echo("== Local LLM Integration ==\n")
         llm_mgr = LocalLlmManager(project_dir)
@@ -268,6 +309,7 @@ def bootstrap(
         click.echo("  3. If using Ollama: .claude/scripts/local-llm.sh setup")
         click.echo("  4. Start a new Claude Code session to activate hooks")
         click.echo("  5. Try agent teams: /team-review, /team-build, /team-debug")
+        click.echo("  6. For Docker agents: superclaude bootstrap --docker-agents --docker-layout fullstack")
 
 
 def _show_result(success: bool, message: str):
