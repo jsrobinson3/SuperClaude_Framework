@@ -253,5 +253,11 @@ def version():
     click.echo(f"SuperClaude version {__version__}")
 
 
+# Register bootstrap subcommand
+from superclaude.cli.bootstrap import bootstrap  # noqa: E402
+
+main.add_command(bootstrap)
+
+
 if __name__ == "__main__":
     main()
