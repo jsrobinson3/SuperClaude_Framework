@@ -200,6 +200,14 @@ def install_airis_gateway(dry_run: bool = False) -> bool:
         click.echo(f"   ❌ Error downloading: {e}", err=True)
         return False
 
+    # Create required files before starting Docker (to prevent Docker from creating them as directories)
+    config_file = install_dir / "mcp-config.json"
+    profiles_dir = install_dir / "profiles"
+
+    if not config_file.exists():
+        config_file.write_text("{}")
+    profiles_dir.mkdir(exist_ok=True)
+
     # Start the gateway from the installation directory
     click.echo("   🐳 Starting AIRIS MCP Gateway containers...")
     try:
