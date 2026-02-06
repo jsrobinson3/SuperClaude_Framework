@@ -93,7 +93,7 @@ MCP_SERVERS = {
 
 def _run_command(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
     """
-    Run a command with proper cross-platform shell handling.
+    Run a command as a list of arguments (no shell interpretation).
 
     Args:
         cmd: Command as list of strings
@@ -111,16 +111,8 @@ def _run_command(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
     if platform.system() == "Windows":
         # On Windows, wrap command in 'cmd /c' to properly handle commands like npx
         cmd = ["cmd", "/c"] + cmd
-        return subprocess.run(cmd, **kwargs)
-    else:
-        # macOS/Linux: Use string format with proper shell to support aliases
-        cmd_str = " ".join(shlex.quote(str(arg)) for arg in cmd)
 
-        # Use the user's shell to execute the command, supporting aliases
-        user_shell = os.environ.get("SHELL", "/bin/bash")
-        return subprocess.run(
-            cmd_str, shell=True, env=os.environ, executable=user_shell, **kwargs
-        )
+    return subprocess.run(cmd, **kwargs)
 
 
 def check_docker_available() -> bool:
@@ -323,26 +315,32 @@ def check_prerequisites() -> Tuple[bool, List[str]]:
     return len(errors) == 0, errors
 
 
-def check_mcp_server_installed(server_name: str) -> bool:
-    """Check if an MCP server is already installed."""
+_mcp_list_cache: Optional[str] = None
+
+
+def _get_mcp_list_output() -> Optional[str]:
+    """Get cached output of 'claude mcp list'. Called once per session."""
+    global _mcp_list_cache
+    if _mcp_list_cache is not None:
+        return _mcp_list_cache
     try:
         result = _run_command(
             ["claude", "mcp", "list"], capture_output=True, text=True, timeout=60
         )
-
-        if result is None or result.returncode != 0:
-            return False
-
-        # Handle case where stdout might be None
-        output = result.stdout
-        if output is None:
-            return False
-
-        # Parse output to check if server is installed
-        return server_name.lower() in output.lower()
-
+        if result.returncode == 0 and result.stdout:
+            _mcp_list_cache = result.stdout
+            return _mcp_list_cache
     except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def check_mcp_server_installed(server_name: str) -> bool:
+    """Check if an MCP server is already installed (uses cached mcp list)."""
+    output = _get_mcp_list_output()
+    if output is None:
         return False
+    return server_name.lower() in output.lower()
 
 
 def prompt_for_api_key(
@@ -430,7 +428,15 @@ def install_mcp_server(
     cmd.extend(shlex.split(command))
 
     if dry_run:
-        click.echo(f"   [DRY RUN] Would run: {' '.join(cmd)}")
+        # Mask API key values in output
+        display_cmd = []
+        for i, arg in enumerate(cmd):
+            if i > 0 and cmd[i - 1] == "--env" and "=" in arg:
+                key_name = arg.split("=", 1)[0]
+                display_cmd.append(f"{key_name}=****")
+            else:
+                display_cmd.append(arg)
+        click.echo(f"   [DRY RUN] Would run: {' '.join(display_cmd)}")
         return True
 
     try:

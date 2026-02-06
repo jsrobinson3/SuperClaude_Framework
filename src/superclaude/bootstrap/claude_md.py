@@ -295,16 +295,35 @@ class ClaudeMdGenerator:
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        BEGIN_MARKER = "<!-- BEGIN: superclaude bootstrap additions -->"
+        END_MARKER = "<!-- END: superclaude bootstrap additions -->"
+
         if path.exists() and merge:
             existing = path.read_text()
-            # Append new content under a separator
-            merged = (
-                existing.rstrip()
-                + "\n\n---\n\n"
-                + "<!-- BEGIN: superclaude bootstrap additions -->\n\n"
+
+            new_block = (
+                BEGIN_MARKER + "\n\n"
                 + new_content
-                + "\n\n<!-- END: superclaude bootstrap additions -->\n"
+                + "\n\n" + END_MARKER + "\n"
             )
+
+            # Check if sentinel block already exists — replace it
+            if BEGIN_MARKER in existing and END_MARKER in existing:
+                begin_idx = existing.index(BEGIN_MARKER)
+                end_idx = existing.index(END_MARKER) + len(END_MARKER)
+                prefix = existing[:begin_idx].rstrip()
+                suffix = existing[end_idx:].lstrip('\n')
+                merged = prefix + "\n\n---\n\n" + new_block
+                if suffix:
+                    merged += "\n" + suffix
+            else:
+                # First time — append with separator
+                merged = (
+                    existing.rstrip()
+                    + "\n\n---\n\n"
+                    + new_block
+                )
+
             path.write_text(merged)
             return f"Merged new content into {path}"
         else:

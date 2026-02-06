@@ -213,8 +213,16 @@ class CommandScaffolder:
         self, name: str, content: str, dry_run: bool = False
     ) -> Tuple[bool, str]:
         """Install a custom slash command."""
+        # Reject names with path separators or traversal attempts
+        if "/" in name or "\\" in name or ".." in name:
+            return False, f"Invalid command name: {name}"
+
         filename = f"{name}.md"
         path = self.commands_dir / filename
+
+        # Verify resolved path stays within commands_dir
+        if not path.resolve().is_relative_to(self.commands_dir.resolve()):
+            return False, f"Invalid command name: {name}"
 
         if dry_run:
             return True, f"Would create {path}"

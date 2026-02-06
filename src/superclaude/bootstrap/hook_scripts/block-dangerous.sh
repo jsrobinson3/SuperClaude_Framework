@@ -83,7 +83,8 @@ if echo "$COMMAND" | grep -qE '^pip\s+install|^python\s+-m\s+pip'; then
 fi
 
 # Flag direct python execution (should use uv run)
-if echo "$COMMAND" | grep -qE '^python\s+((?!-c).)+\.py'; then
+# Match 'python <something>.py' but not 'python -c ...' (ERE-compatible, no PCRE lookahead)
+if echo "$COMMAND" | grep -qE '^python\s+' && echo "$COMMAND" | grep -qE '\.py' && ! echo "$COMMAND" | grep -qE '^python\s+-c'; then
   warn_and_ask "This project uses UV. Consider using 'uv run python script.py' instead."
 fi
 

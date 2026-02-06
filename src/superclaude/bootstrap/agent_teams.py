@@ -444,12 +444,12 @@ class AgentTeamsConfigurator:
 
         # Language
         langs = analysis.get("languages", [])
-        primary = next((l["name"] for l in langs if l.get("primary")), None)
+        primary = next((lang["name"] for lang in langs if lang.get("primary")), None)
         if primary:
             ctx["language"] = primary
 
         # Linters
-        linters = [l["name"] for l in analysis.get("linters", [])]
+        linters = [lint["name"] for lint in analysis.get("linters", [])]
         if linters:
             ctx["linter_instruction"] = (
                 f"Use {', '.join(linters)} to validate your changes."
@@ -552,53 +552,6 @@ class AgentTeamsConfigurator:
         if skipped:
             parts.append(f"Already exists (skipped): {', '.join(skipped)}")
         return "\n".join(parts)
-
-    def generate_claude_md_section(self, roles: Optional[List[Dict[str, Any]]] = None) -> str:
-        """Generate CLAUDE.md section for agent teams."""
-        lines = [
-            "## Agent Teams — Specialist Roles",
-            "",
-            "This project has agent teams enabled with project-specific specialist roles",
-            "defined in `.claude/teams.json`. Each role has a tuned spawn prompt.",
-            "",
-            "### Available Specialists",
-        ]
-
-        if roles:
-            for r in roles:
-                lines.append(f"- **{r['title']}** [{r['category']}]")
-        else:
-            lines.append("- See `.claude/teams.json` for the full list")
-
-        lines.extend([
-            "",
-            "### Key Patterns",
-            "",
-            "**Specialization over assignment**: Give each agent a distinct skill",
-            "(deduplicator, performance optimizer, security auditor) rather than",
-            "a generic area (frontend, backend). Specialists produce better results.",
-            "",
-            "**File ownership**: Each teammate owns distinct files. No two teammates",
-            "edit the same file — this prevents conflicts and overwrites.",
-            "",
-            "**Adversarial review**: For debugging, have agents actively try to",
-            "DISPROVE each other's theories. The hypothesis that survives is most",
-            "likely correct.",
-            "",
-            "**Failing test parallelization**: When many tests fail, assign each",
-            "to a different agent — trivially parallel.",
-            "",
-            "### Team Commands",
-            "- `/team-build` — Parallel feature build with specialist roles",
-            "- `/team-review` — Code review (security + quality + performance)",
-            "- `/team-debug` — Competing hypothesis investigation",
-            "- `/team-research` — Multi-angle research",
-            "- `/team-refactor` — Parallel refactoring with file ownership",
-            "- `/team-sync` — Sync API contracts between frontend/backend (monorepo)",
-            "",
-        ])
-
-        return "\n".join(lines)
 
     # ── Settings I/O ───────────────────────────────────────────────────
 

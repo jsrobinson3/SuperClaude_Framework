@@ -20,6 +20,33 @@ class EnvironmentAnalyzer:
         self.home_dir = Path.home()
         self.claude_dir = self.home_dir / ".claude"
         self.project_claude_dir = self.project_dir / ".claude"
+        self._pyproject_text_cache: Optional[str] = None
+        self._pyproject_text_loaded = False
+        self._package_json_cache: Optional[Dict] = None
+        self._package_json_loaded = False
+
+    @property
+    def _pyproject_text(self) -> Optional[str]:
+        """Cached read of pyproject.toml text content."""
+        if not self._pyproject_text_loaded:
+            pyproject = self.project_dir / "pyproject.toml"
+            if pyproject.exists():
+                self._pyproject_text_cache = pyproject.read_text()
+            self._pyproject_text_loaded = True
+        return self._pyproject_text_cache
+
+    @property
+    def _package_json(self) -> Optional[Dict]:
+        """Cached parsed package.json data."""
+        if not self._package_json_loaded:
+            pkg_json = self.project_dir / "package.json"
+            if pkg_json.exists():
+                try:
+                    self._package_json_cache = json.loads(pkg_json.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+            self._package_json_loaded = True
+        return self._package_json_cache
 
     def analyze(self) -> Dict[str, Any]:
         """Run full environment analysis. Returns a structured report."""
@@ -48,16 +75,19 @@ class EnvironmentAnalyzer:
     def _detect_subprojects(self) -> List[Dict[str, Any]]:
         """Detect subprojects in a monorepo (directories with their own package.json)."""
         subprojects = []
+        skip_dirs = {"node_modules", ".venv", "dist", "build", ".git"}
 
-        # Find all package.json files (excluding node_modules, .venv, etc.)
-        for pkg_json in self.project_dir.rglob("package.json"):
-            # Skip root-level package.json
-            if pkg_json.parent == self.project_dir:
+        # Use os.walk with pruning to avoid descending into node_modules etc.
+        for dirpath, dirnames, filenames in os.walk(self.project_dir):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+
+            if "package.json" not in filenames:
                 continue
 
-            # Skip excluded directories
-            rel_path = pkg_json.relative_to(self.project_dir)
-            if any(part in {"node_modules", ".venv", "dist", "build", ".git"} for part in rel_path.parts):
+            pkg_json = Path(dirpath) / "package.json"
+
+            # Skip root-level package.json
+            if pkg_json.parent == self.project_dir:
                 continue
 
             # Analyze this subproject
@@ -242,9 +272,8 @@ class EnvironmentAnalyzer:
         frameworks = []
 
         # Python frameworks
-        pyproject = self.project_dir / "pyproject.toml"
-        if pyproject.exists():
-            content = pyproject.read_text()
+        content = self._pyproject_text
+        if content:
             py_frameworks = {
                 "django": "django",
                 "flask": "flask",
@@ -258,29 +287,25 @@ class EnvironmentAnalyzer:
                     frameworks.append({"name": name, "language": "python"})
 
         # JS/TS frameworks
-        pkg_json = self.project_dir / "package.json"
-        if pkg_json.exists():
-            try:
-                pkg = json.loads(pkg_json.read_text())
-                all_deps = {
-                    **pkg.get("dependencies", {}),
-                    **pkg.get("devDependencies", {}),
-                }
-                js_frameworks = {
-                    "react": "React",
-                    "next": "Next.js",
-                    "vue": "Vue",
-                    "nuxt": "Nuxt",
-                    "express": "Express",
-                    "nestjs": "NestJS",
-                    "svelte": "Svelte",
-                    "angular": "Angular",
-                }
-                for key, name in js_frameworks.items():
-                    if any(key in dep.lower() for dep in all_deps):
-                        frameworks.append({"name": name, "language": "javascript/typescript"})
-            except (json.JSONDecodeError, OSError):
-                pass
+        pkg = self._package_json
+        if pkg:
+            all_deps = {
+                **pkg.get("dependencies", {}),
+                **pkg.get("devDependencies", {}),
+            }
+            js_frameworks = {
+                "react": "React",
+                "next": "Next.js",
+                "vue": "Vue",
+                "nuxt": "Nuxt",
+                "express": "Express",
+                "nestjs": "NestJS",
+                "svelte": "Svelte",
+                "angular": "Angular",
+            }
+            for key, name in js_frameworks.items():
+                if any(key in dep.lower() for dep in all_deps):
+                    frameworks.append({"name": name, "language": "javascript/typescript"})
 
         return frameworks
 
@@ -307,24 +332,19 @@ class EnvironmentAnalyzer:
                 managers.append({"name": name, "lockfile": lockfile, "language": lang})
 
         # Special case: detect UV from pyproject.toml tool.uv section
-        pyproject = self.project_dir / "pyproject.toml"
-        if pyproject.exists() and "[tool.uv]" in pyproject.read_text():
+        content = self._pyproject_text
+        if content and "[tool.uv]" in content:
             if not any(m["name"] == "uv" for m in managers):
                 managers.append({"name": "uv", "lockfile": "pyproject.toml", "language": "python"})
 
         # Check package.json for explicit packageManager field (Corepack)
-        pkg_json = self.project_dir / "package.json"
-        if pkg_json.exists():
-            try:
-                pkg = json.loads(pkg_json.read_text())
-                if "packageManager" in pkg:
-                    # Format: "yarn@3.6.4" or "pnpm@8.0.0"
-                    pm_spec = pkg["packageManager"]
-                    pm_name = pm_spec.split("@")[0] if "@" in pm_spec else pm_spec
-                    if not any(m["name"] == pm_name for m in managers):
-                        managers.append({"name": pm_name, "lockfile": "package.json", "language": "javascript"})
-            except (json.JSONDecodeError, OSError):
-                pass
+        pkg = self._package_json
+        if pkg and "packageManager" in pkg:
+            # Format: "yarn@3.6.4" or "pnpm@8.0.0"
+            pm_spec = pkg["packageManager"]
+            pm_name = pm_spec.split("@")[0] if "@" in pm_spec else pm_spec
+            if not any(m["name"] == pm_name for m in managers):
+                managers.append({"name": pm_name, "lockfile": "package.json", "language": "javascript"})
 
         return managers
 
@@ -334,9 +354,8 @@ class EnvironmentAnalyzer:
         """Detect test frameworks and their configuration."""
         frameworks = []
 
-        pyproject = self.project_dir / "pyproject.toml"
-        if pyproject.exists():
-            content = pyproject.read_text()
+        content = self._pyproject_text
+        if content:
             if "[tool.pytest" in content:
                 cfg = {"name": "pytest", "language": "python", "config": "pyproject.toml"}
                 # Extract test paths
@@ -344,19 +363,15 @@ class EnvironmentAnalyzer:
                     cfg["test_dirs"] = ["tests"]
                 frameworks.append(cfg)
 
-        pkg_json = self.project_dir / "package.json"
-        if pkg_json.exists():
-            try:
-                pkg = json.loads(pkg_json.read_text())
-                all_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-                if "jest" in all_deps:
-                    frameworks.append({"name": "jest", "language": "javascript"})
-                if "vitest" in all_deps:
-                    frameworks.append({"name": "vitest", "language": "javascript"})
-                if "mocha" in all_deps:
-                    frameworks.append({"name": "mocha", "language": "javascript"})
-            except (json.JSONDecodeError, OSError):
-                pass
+        pkg = self._package_json
+        if pkg:
+            all_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if "jest" in all_deps:
+                frameworks.append({"name": "jest", "language": "javascript"})
+            if "vitest" in all_deps:
+                frameworks.append({"name": "vitest", "language": "javascript"})
+            if "mocha" in all_deps:
+                frameworks.append({"name": "mocha", "language": "javascript"})
 
         # Check for test directories
         test_dirs = ["tests", "test", "__tests__", "spec"]
@@ -382,10 +397,7 @@ class EnvironmentAnalyzer:
             ("biome", ["biome.json", "biome.jsonc"], None, None),
         ]
 
-        pyproject_content = ""
-        pyproject = self.project_dir / "pyproject.toml"
-        if pyproject.exists():
-            pyproject_content = pyproject.read_text()
+        pyproject_content = self._pyproject_text or ""
 
         for name, config_files, toml_file, toml_section in checks:
             found = any((self.project_dir / f).exists() for f in config_files)
@@ -395,18 +407,14 @@ class EnvironmentAnalyzer:
                 linters.append({"name": name})
 
         # Check package.json for JS/TS linters in dependencies
-        pkg_json = self.project_dir / "package.json"
-        if pkg_json.exists():
-            try:
-                pkg = json.loads(pkg_json.read_text())
-                all_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+        pkg = self._package_json
+        if pkg:
+            all_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
 
-                js_linters = ["eslint", "prettier", "biome", "stylelint", "tslint"]
-                for linter in js_linters:
-                    if linter in all_deps and not any(l["name"] == linter for l in linters):
-                        linters.append({"name": linter})
-            except (json.JSONDecodeError, OSError):
-                pass
+            js_linters = ["eslint", "prettier", "biome", "stylelint", "tslint"]
+            for linter_name in js_linters:
+                if linter_name in all_deps and not any(existing["name"] == linter_name for existing in linters):
+                    linters.append({"name": linter_name})
 
         return linters
 
@@ -550,19 +558,13 @@ class EnvironmentAnalyzer:
                         scripts["makefile"].append(target)
 
         # package.json scripts
-        pkg_json = self.project_dir / "package.json"
-        if pkg_json.exists():
-            try:
-                pkg = json.loads(pkg_json.read_text())
-                scripts["package_json"] = list(pkg.get("scripts", {}).keys())
-            except (json.JSONDecodeError, OSError):
-                pass
+        pkg = self._package_json
+        if pkg:
+            scripts["package_json"] = list(pkg.get("scripts", {}).keys())
 
         # pyproject.toml scripts
-        pyproject = self.project_dir / "pyproject.toml"
-        if pyproject.exists():
-            content = pyproject.read_text()
-            if "[project.scripts]" in content:
+        content = self._pyproject_text
+        if content and "[project.scripts]" in content:
                 in_scripts = False
                 for line in content.split("\n"):
                     if "[project.scripts]" in line:

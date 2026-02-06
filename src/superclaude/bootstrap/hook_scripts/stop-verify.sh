@@ -10,10 +10,10 @@ set -euo pipefail
 INPUT=$(cat)
 
 # Prevent infinite loops: if stop hook is already active, allow stop
-STOP_HOOK_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false')
-if [[ "$STOP_HOOK_ACTIVE" == "true" ]]; then
+if [[ "${SUPERCLAUDE_STOP_HOOK_ACTIVE:-}" == "true" ]]; then
   exit 0
 fi
+export SUPERCLAUDE_STOP_HOOK_ACTIVE=true
 
 # Detect project type and run quick test suite
 PROJECT_DIR=$(echo "$INPUT" | jq -r '.cwd // "."')

@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ── MCP Server Definitions ─────────────────────────────────────────────
-# Servers referenced in the bootstrap spec.
+# Legacy server definitions used by bootstrap's CLAUDE.md MCP policy section.
+# The canonical MCP server registry is in cli/install_mcp.py (used by `superclaude mcp`).
 
 MCP_SERVER_DEFS: Dict[str, Dict[str, Any]] = {
     "atlassian": {

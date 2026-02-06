@@ -23,7 +23,6 @@ from superclaude.bootstrap.claude_md import ClaudeMdGenerator
 from superclaude.bootstrap.commands import CommandScaffolder
 from superclaude.bootstrap.hooks import HOOK_PROFILES, HookInstaller
 from superclaude.bootstrap.local_llm import LocalLlmManager
-from superclaude.bootstrap.mcp_config import McpConfigManager
 
 
 @click.command()
@@ -160,37 +159,26 @@ def bootstrap(
     # ── Step 3: MCP Servers ──────────────────────────────────────────
     if run_all or mcp:
         click.echo("== MCP Server Configuration ==\n")
-        mcp_mgr = McpConfigManager(project_dir, scope=scope)
-
-        server_list = list(mcp_servers) if mcp_servers else None
-
-        if server_list is None and not dry_run and not yes:
-            click.echo("Available MCP servers:")
-            for srv in mcp_mgr.list_available():
-                status = "installed" if srv["installed"] else "not configured"
-                click.echo(f"  {srv['name']:25} {srv['description']} [{status}]")
-                if srv["env_vars"]:
-                    click.echo(f"    Requires: {', '.join(srv['env_vars'])}")
+        if dry_run:
+            click.echo("  [DRY RUN] Would display MCP installation instructions")
+        else:
+            click.echo("  MCP servers are installed separately using the superclaude CLI.")
+            click.echo("  After bootstrap completes, run:\n")
+            click.echo("    superclaude mcp                              # Interactive (recommended)")
+            click.echo("    superclaude mcp --list                       # See available servers")
+            click.echo("    superclaude mcp --servers sequential-thinking --servers docker")
             click.echo()
-
-            if click.confirm("Install all available MCP servers?", default=True):
-                server_list = None  # None = all
-            else:
-                raw = click.prompt(
-                    "Enter server names (comma-separated)",
-                    default="sequential-thinking,docker",
-                )
-                server_list = [s.strip() for s in raw.split(",")]
-
-        success, msg = mcp_mgr.install(server_list, dry_run=dry_run)
-        _show_result(success, msg)
+            click.echo("  Available servers: sequential-thinking, context7, tavily, playwright,")
+            click.echo("                     docker, serena, magic, morphllm-fast-apply,")
+            click.echo("                     chrome-devtools, airis-mcp-gateway")
         click.echo()
 
     # ── Step 4: CLAUDE.md ────────────────────────────────────────────
     if run_all or claude_md:
         click.echo("== CLAUDE.md Generation ==\n")
-        analyzer = EnvironmentAnalyzer(project_dir)
-        report = analyzer.analyze()
+        if report is None:
+            analyzer = EnvironmentAnalyzer(project_dir)
+            report = analyzer.analyze()
         generator = ClaudeMdGenerator(project_dir)
 
         # Global
@@ -198,11 +186,8 @@ def bootstrap(
             developer = click.prompt("Developer name", default="")
         developer = developer or ""
 
-        # Determine MCP server names for global config
-        mcp_mgr = McpConfigManager(project_dir, scope=scope)
-        installed_mcp = [s["name"] for s in mcp_mgr.list_available() if s["installed"]]
-        if not installed_mcp:
-            installed_mcp = list(mcp_servers) if mcp_servers else []
+        # Use MCP server names from CLI args, or defaults for initial bootstrap
+        installed_mcp = list(mcp_servers) if mcp_servers else ["sequential-thinking", "docker"]
 
         global_content = generator.generate_global(
             report, developer_name=developer, mcp_servers=installed_mcp
@@ -273,7 +258,7 @@ def bootstrap(
         click.echo("== Monorepo Subproject Bootstrap ==\n")
 
         # Get subprojects from analysis
-        if 'report' not in locals():
+        if report is None:
             analyzer = EnvironmentAnalyzer(project_dir)
             report = analyzer.analyze()
 
@@ -336,7 +321,7 @@ def bootstrap(
         click.echo("What was set up:")
         click.echo("  - Code quality hooks (in .claude/settings.json)")
         click.echo("  - Hook scripts (in .claude/hooks/)")
-        click.echo("  - MCP server configuration (in .claude/mcp.json)")
+        click.echo("  - MCP servers: run 'superclaude mcp' to install")
         click.echo("  - Slash commands (in .claude/commands/)")
         click.echo("  - Agent teams with specialized roles (in .claude/teams.json)")
         click.echo("  - CLAUDE.md (global and project-level)")
@@ -346,7 +331,7 @@ def bootstrap(
         click.echo()
         click.echo("Next steps:")
         click.echo("  1. Review .claude/ directory contents")
-        click.echo("  2. Set required environment variables for MCP servers")
+        click.echo("  2. Install MCP servers: superclaude mcp")
         click.echo("  3. If using Ollama: .claude/scripts/local-llm.sh setup")
         click.echo("  4. Start a new Claude Code session to activate hooks")
         if monorepo:
@@ -358,6 +343,5 @@ def bootstrap(
 
 def _show_result(success: bool, message: str):
     """Display a result with appropriate formatting."""
-    prefix = "OK" if success else "FAIL"
     for line in message.split("\n"):
         click.echo(f"  {line}")

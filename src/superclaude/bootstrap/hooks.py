@@ -254,8 +254,8 @@ class HookInstaller:
                 continue
 
             shutil.copy2(src, dst)
-            # Make executable
-            dst.chmod(dst.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            # Make executable for owner and group only (no world-execute)
+            dst.chmod(dst.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP)
             installed.append(hook["script"])
 
         return installed
