@@ -110,6 +110,24 @@ class ClaudeMdGenerator:
                 )
             sections.append("")
 
+        # Agent Teams
+        sections.append("## Agent Teams\n")
+        sections.append(
+            "Agent teams are enabled. For tasks where parallel exploration adds value,\n"
+            "create a team with specialized teammates. Key commands:\n"
+        )
+        sections.append("- `/team-review` — Parallel code review (security + quality + performance)")
+        sections.append("- `/team-debug` — Competing hypothesis investigation")
+        sections.append("- `/team-build` — Parallel feature implementation with file ownership")
+        sections.append("- `/team-research` — Multi-angle research and decision-making")
+        sections.append("- `/team-refactor` — Safe parallel refactoring")
+        sections.append("")
+        sections.append(
+            "**File ownership rule**: Each teammate owns distinct files. "
+            "No two teammates edit the same file."
+        )
+        sections.append("")
+
         # Response Standards
         sections.append("## Response Standards\n")
         sections.append(

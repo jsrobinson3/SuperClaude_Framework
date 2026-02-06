@@ -9,6 +9,7 @@ Orchestrates the full Claude Code environment setup:
   superclaude bootstrap --commands  # Install slash commands only
   superclaude bootstrap --llm       # Set up local LLM only
   superclaude bootstrap --claude-md # Generate CLAUDE.md files only
+  superclaude bootstrap --teams     # Configure agent teams only
 """
 
 import os
@@ -16,6 +17,7 @@ import sys
 
 import click
 
+from superclaude.bootstrap.agent_teams import AgentTeamsConfigurator
 from superclaude.bootstrap.analyzer import EnvironmentAnalyzer
 from superclaude.bootstrap.claude_md import ClaudeMdGenerator
 from superclaude.bootstrap.commands import CommandScaffolder
@@ -42,6 +44,13 @@ from superclaude.bootstrap.mcp_config import McpConfigManager
 @click.option("--commands", is_flag=True, help="Install slash commands only")
 @click.option("--llm", is_flag=True, help="Set up local LLM integration only")
 @click.option("--claude-md", is_flag=True, help="Generate CLAUDE.md files only")
+@click.option("--teams", is_flag=True, help="Configure agent teams only")
+@click.option(
+    "--teammate-mode",
+    type=click.Choice(["auto", "in-process", "tmux"]),
+    default="auto",
+    help="Agent teams display mode (default: auto)",
+)
 @click.option(
     "--scope",
     type=click.Choice(["project", "user", "local"]),
@@ -61,6 +70,8 @@ def bootstrap(
     commands,
     llm,
     claude_md,
+    teams,
+    teammate_mode,
     scope,
     dry_run,
     vram,
@@ -85,7 +96,7 @@ def bootstrap(
         superclaude bootstrap --dry-run                # Preview everything
     """
     # If no specific flag, run everything
-    run_all = not any([analyze, hooks, mcp, commands, llm, claude_md])
+    run_all = not any([analyze, hooks, mcp, commands, llm, claude_md, teams])
 
     project_dir = os.getcwd()
 
@@ -203,7 +214,19 @@ def bootstrap(
         _show_result(success, msg)
         click.echo()
 
-    # ── Step 6: Local LLM ────────────────────────────────────────────
+    # ── Step 6: Agent Teams ──────────────────────────────────────────
+    if run_all or teams:
+        click.echo("== Agent Teams ==\n")
+        teams_cfg = AgentTeamsConfigurator(project_dir, scope=scope)
+
+        success, msg = teams_cfg.install(
+            teammate_mode=teammate_mode,
+            dry_run=dry_run,
+        )
+        _show_result(success, msg)
+        click.echo()
+
+    # ── Step 7: Local LLM ────────────────────────────────────────────
     if run_all or llm:
         click.echo("== Local LLM Integration ==\n")
         llm_mgr = LocalLlmManager(project_dir)
@@ -235,6 +258,7 @@ def bootstrap(
         click.echo("  - Hook scripts (in .claude/hooks/)")
         click.echo("  - MCP server configuration (in .claude/mcp.json)")
         click.echo("  - Slash commands (in .claude/commands/)")
+        click.echo("  - Agent teams (feature flag + team commands)")
         click.echo("  - CLAUDE.md (global and project-level)")
         click.echo("  - Local LLM helper (in .claude/scripts/)")
         click.echo()
@@ -243,6 +267,7 @@ def bootstrap(
         click.echo("  2. Set required environment variables for MCP servers")
         click.echo("  3. If using Ollama: .claude/scripts/local-llm.sh setup")
         click.echo("  4. Start a new Claude Code session to activate hooks")
+        click.echo("  5. Try agent teams: /team-review, /team-build, /team-debug")
 
 
 def _show_result(success: bool, message: str):
